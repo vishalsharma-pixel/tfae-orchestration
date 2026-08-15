@@ -1,0 +1,63 @@
+# jql.yaml
+#
+# Every JQL query used anywhere in the pipeline, named and documented.
+# No script should construct a JQL string inline — every query lives here,
+# and every one MUST interpolate project_key from guardrails.yaml rather
+# than hardcoding "TFAE" separately. This is what makes a scope mistake
+# (e.g. querying TA by accident) a visible diff in this file, not a typo
+# buried in a script.
+#
+# Placeholders like {project_key} are filled in at runtime from guardrails.yaml.
+
+queries:
+
+  find_undispatched_tasks:
+    description: >
+      Tasks sitting in "To Do" that haven't been picked up yet. This is the
+      conductor's dispatch queue.
+    jql: >
+      project = {project_key} AND status = "To Do" AND issuetype != Story
+
+  find_dispatched_tasks:
+    description: >
+      Tasks currently "In Progress" — i.e. a Cursor agent was dispatched and
+      we're waiting on it. status-sync polls Cursor for each of these.
+    jql: >
+      project = {project_key} AND status = "In Progress" AND issuetype != Story
+
+  find_open_stories:
+    description: >
+      Stories not yet finished — used to check whether any story's tasks
+      have all reached "Ready To Test" and are eligible for a manual QA pass.
+    jql: >
+      project = {project_key} AND issuetype = Story
+      AND status not in ("Ready for Production", "LIVE")
+
+  find_stale_in_progress:
+    description: >
+      In Progress tasks that haven't changed status in longer than
+      staleness_timeout_hours (see guardrails.yaml). Used to flag agents that
+      may have silently stalled or errored without status-sync noticing.
+    jql: >
+      project = {project_key} AND status = "In Progress"
+      AND updated <= "-{staleness_timeout_hours}h"
+
+  find_kill_switch_status:
+    description: >
+      Checks whether the kill_switch_label (see guardrails.yaml) is present
+      on the pipeline's tracking issue. Run FIRST, every conductor cycle,
+      before any other query or action.
+    jql: >
+      project = {project_key} AND labels = "{kill_switch_label}"
+
+  find_stories_over_qa_cap:
+    description: >
+      Stories that have hit max_qa_cycles_per_story failed passes, tracked
+      via the "QA Cycle Count" custom field (customfield_10320 in TFAE,
+      confirmed by querying a real TFAE story — see
+      docs/getting-started.md Step "QA Cycle Count setup"). Scoped to Story
+      issue type only in Jira's field context, so this field does not exist
+      on Tasks/Subtasks. Confirmed working: null/blank on a fresh story.
+    jql: >
+      project = {project_key} AND issuetype = Story
+      AND cf[10320] >= {max_qa_cycles_per_story}

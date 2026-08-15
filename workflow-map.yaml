@@ -1,0 +1,110 @@
+# workflow-map.yaml
+#
+# Maps TFAE's actual, real Jira workflow statuses (confirmed by querying
+# TFAE directly) onto the conceptual pipeline stages used in the writeup and
+# in every script. No new Jira statuses are created for this pipeline — it
+# rides entirely on what already exists in TFAE.
+#
+# If TFAE's workflow ever changes (a status renamed, added, or removed),
+# update this file and nothing else needs to change conceptually.
+
+statuses:
+  # name: the exact TFAE status name (case-sensitive, must match Jira exactly)
+  # pipeline_stage: what this status means in the orchestration pipeline
+
+  - name: Idea
+    pipeline_stage: not_yet_queued
+    notes: >
+      Pre-queue. Tasks/stories here are not yet ready for the pipeline to
+      touch — they haven't been reviewed into "To Do" yet.
+
+  - name: To Do
+    pipeline_stage: queued
+    notes: The conductor's dispatch queue (see jql.yaml find_undispatched_tasks).
+
+  - name: In Progress
+    pipeline_stage: dispatched
+    notes: >
+      A Cursor agent has been created for this task. status-sync polls
+      Cursor for tasks in this status.
+
+  - name: Code Review
+    pipeline_stage: pr_open
+    notes: >
+      Cursor's agent finished and opened a PR; status-sync linked it here.
+      Sits here until a human reviews it — nothing auto-advances past this.
+
+  - name: Ready To Test
+    pipeline_stage: dev_complete
+    notes: >
+      All of a story's child tasks reaching this status is the signal that
+      the story is eligible for a manual QA trigger (see jql.yaml
+      find_open_stories + the story-readiness check in conductor logic).
+
+  - name: Testing
+    pipeline_stage: qa_in_progress
+    notes: >
+      Set manually when you trigger a QA pass on a story. Prevents the
+      conductor from re-flagging the same story as "ready for QA" while
+      you're actively reviewing it.
+
+  - name: Ready for Production
+    pipeline_stage: verified
+    notes: Manual QA passed. Story is done from this pipeline's perspective.
+
+  - name: On Hold
+    pipeline_stage: paused
+    notes: >
+      Not currently used by any automated query, but reserved — if a task
+      or story is manually set to On Hold, no script should pick it up.
+      Any new query added later MUST exclude this status explicitly.
+      Reserved specifically for "a human chose to pause this" — kept
+      distinct from the needs-human-review label below, which means
+      "the automation stopped itself" instead.
+
+  - name: LIVE
+    pipeline_stage: shipped
+    notes: Terminal state, outside this pipeline's concern.
+
+# Bug loop note:
+# Bugs found in manual QA are NOT a new status — they're new Subtask issues
+# created under the story, landing in "To Do" like any other task. The bug
+# loop is just the normal dispatch queue picking up a new subtask; there is
+# no separate "Bugs Filed" status to maintain.
+
+# QA cycle tracking (added after initial setup):
+# "QA Cycle Count" is a Number custom field (customfield_10320 in TFAE),
+# scoped to Story issue type only via its Jira field context. It is NOT a
+# status — it's a counter, incremented by hand by 1 each time a manual QA
+# pass fails. When it reaches max_qa_cycles_per_story (see guardrails.yaml),
+# apply the needs-human-review label instead of continuing to recycle the
+# story through dispatch. Confirmed: the field appears on TFAE Stories,
+# does not appear on TFAE Tasks/Subtasks, and does not appear on issues in
+# other projects (TA, TFHFUNNEL) — verified against TFAE-2.
+
+# Transition triggers (explicit, so a future rename has something to check
+# against — see docs/writeup.md "Failure mode 4" discussion):
+transition_triggers:
+  - from: To Do
+    to: In Progress
+    trigger: Conductor dispatches a Cursor agent for this task.
+  - from: In Progress
+    to: Code Review
+    trigger: status-sync detects the Cursor agent finished and a PR is open.
+  - from: Code Review
+    to: Ready To Test
+    trigger: >
+      The PR is MERGED — not just opened. This is a manual action for now
+      (you decide when to merge); status-sync does not auto-merge anything.
+  - from: Ready To Test
+    to: Testing
+    trigger: You manually trigger a QA pass on the story.
+  - from: Testing
+    to: Ready for Production
+    trigger: Manual QA pass succeeds.
+  - from: Testing
+    to: Ready To Test
+    trigger: >
+      Manual QA pass fails: increment "QA Cycle Count" by 1, file a bug
+      subtask (lands in To Do), move story back to Ready To Test (or leave
+      in Testing — decide one convention and apply it consistently).

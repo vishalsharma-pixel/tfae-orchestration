@@ -1,0 +1,79 @@
+# guardrails.yaml
+#
+# The single source of truth for every limit in the orchestration pipeline.
+# Every script (dispatcher, status-sync, conductor) reads these values from
+# here — none of them should hardcode a number independently. If a value
+# needs to change, it changes in exactly one place, and that change is a
+# visible commit.
+#
+# Since access is via your personal Rovo/Atlassian connection (not a scoped
+# service account), `project_key` below is the REAL boundary that keeps this
+# system contained to TFAE. Treat any change to project_key as the highest-
+# risk edit in this entire repo.
+
+# --- Scope boundary ---
+project_key: TFAE
+# Every JQL query in jql.yaml must interpolate this value rather than
+# hardcoding "TFAE" separately. If this ever needs to point elsewhere,
+# that's a deliberate, reviewed change — not a side effect of editing a query.
+
+# --- Concurrency ---
+max_concurrent_agents: 3
+# Hard ceiling on Cursor Cloud Agents running at once, system-wide (not per
+# story). This is the primary spend and blast-radius control in the system.
+
+dispatch_batch_size: 1
+# Per conductor wake-up, dispatch at most this many NEW tasks, even if more
+# free slots and more undispatched tasks exist. Keeps each cycle small enough
+# to watch and reason about.
+
+max_dispatch_per_story_per_cycle: 1
+# Placeholder substitute for real file-overlap detection (not built yet).
+# Prevents two tasks under the same story running as parallel agents that
+# could produce conflicting PRs.
+
+# --- Bug loop bound ---
+max_qa_cycles_per_story: 3
+# After this many failed QA passes on the same story, the conductor stops
+# auto-recycling it through dispatch. The story gets flagged for manual
+# review instead of continuing to loop.
+#
+# Tracked via the "QA Cycle Count" custom field (customfield_10320 in
+# TFAE), scoped to Story issue type only. Increment this field by 1 by hand
+# each time a manual QA pass fails on a story (see docs/getting-started.md).
+# This is a counter, not a status — it's what makes this cap real instead
+# of aspirational.
+
+needs_human_review_label: needs-human-review
+# Applied to a story when it hits max_qa_cycles_per_story. Distinct from
+# on_hold_status below: this means "the automation stopped itself because a
+# threshold was hit," not "a human chose to pause this."
+
+# --- Staleness ---
+staleness_timeout_hours: 4
+# If a dispatched agent's Jira issue has been "In Progress" longer than this
+# with no status change, stop treating it as active. Flag it, don't keep
+# silently polling it forever.
+
+# --- Kill switch ---
+kill_switch_label: automation-paused
+# A Jira label. If present on the pipeline's tracking issue (see
+# workflow-map.yaml for where this is checked), the conductor does nothing
+# this cycle — checked FIRST, before any other action, every wake-up.
+
+# --- Schedule ---
+conductor_interval_minutes: 20
+# How often the conductor wakes up. Slower is fine — there's no reason to
+# rush this while trust in the system is still being built.
+
+# --- Rate limiting on repeated actions ---
+comment_cooldown_hours: 1
+# Don't post the same failure/status comment on the same issue more than
+# once within this window, even if the conductor re-checks it every cycle.
+# Prevents comment spam from a recoverable-looking error that keeps recurring.
+
+# --- QA blast radius ---
+max_bugs_filed_per_qa_pass: 3
+# If a manual QA pass would file more than this many bug subtasks in one go,
+# stop and treat the story as "too unclear to verify" instead — that's a
+# signal the acceptance criteria need a human look, not more bug tickets.
