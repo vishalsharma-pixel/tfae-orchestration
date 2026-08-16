@@ -76,20 +76,45 @@ from `jql.yaml`, get every TFAE task currently "In Progress." For each one:
      `prUrl` (an agent can push multiple branches — look across all
      entries). If a `prUrl` is present, comment that PR link on the Jira
      issue, and transition per `workflow-map.yaml`'s `transition_triggers`
-     (In Progress → Code Review). If `FINISHED` but no `prUrl` appears in
-     any branch entry, comment that the run finished without opening a PR
-     and flag for a human to check — don't assume Code Review is correct
-     without an actual PR link.
-   - **If `ERROR` or `CANCELLED`**: comment the failure on the issue,
-     summarizing *why* in plain language using `run.result` if present. Do
-     not re-dispatch automatically — that's a human decision.
-   - **If `EXPIRED`**: treat the same as a failure — comment and flag,
-     don't silently drop it.
+     (In Progress → Code Review). **This is a notification-worthy event —
+     see the notification rules below.** If `FINISHED` but no `prUrl`
+     appears in any branch entry, comment that the run finished without
+     opening a PR and flag for a human to check — don't assume Code Review
+     is correct without an actual PR link. **This is also
+     notification-worthy** — a finished-but-no-PR run is exactly the kind
+     of thing that shouldn't sit silently until someone happens to check
+     Jira.
+   - **If `ERROR` or `CANCELLED`**: transition the task to **"Manual
+     Intervention Needed"** and comment the failure, summarizing *why* in
+     plain language using `run.result` if present. Do not re-dispatch
+     automatically — that's a human decision.
+   - **If `EXPIRED`**: same treatment as a failure — transition to
+     "Manual Intervention Needed" and comment, don't silently drop it.
    - **If `CREATING` or `RUNNING`**: still in flight, no action needed
      this cycle beyond the staleness check below.
 4. **If running (`CREATING`/`RUNNING`) longer than `staleness_timeout_hours`**
    with no change: flag it as possibly stalled in a comment. Still counts
    as occupying a concurrency slot — do not treat it as free capacity.
+
+**Recompute every eligible story's rollup status now, fresh, every cycle**
+(never remembered from a prior cycle's decision). For each story returned
+by `find_agent_eligible_stories`, plus any story currently in "Manual
+Intervention Needed" or "PR By Agent" (so a story can roll back out of
+those states too), fetch its child tasks via `find_child_tasks_of_story`
+and apply this priority order — top condition wins if more than one is true:
+
+1. **Manual Intervention Needed** — if ANY child task is in this status.
+2. **PR By Agent** — else if ALL child tasks are "Code Review" or later
+   (Code Review, Ready To Test, Testing, Ready for Production, LIVE — none
+   remain in To Do, In Progress, or Manual Intervention Needed).
+3. **Agent In Progress** — else if at least one child task has left "To Do."
+4. **Ready for Agent** — else, leave unchanged (nothing dispatched yet).
+
+Transition the story if its computed status differs from its current
+status. This rollup is intentionally a fresh computation every cycle, not
+a remembered state machine — a story recovers from "Manual Intervention
+Needed" automatically the moment a human clears every flagged child task,
+with no separate manual action needed on the story itself.
 
 Then, **count current capacity**: how many TFAE tasks are "In Progress"
 **with a valid agentId comment** (i.e. actually dispatched by this Routine,
@@ -99,9 +124,23 @@ not just manually moved to that status).
 Log that no free slot exists this cycle and end. This is a hard numeric
 comparison, not a judgment call, regardless of how urgent anything looks.
 
-If a slot is free, use `find_undispatched_tasks` from `jql.yaml` to see
-what stories and tasks are queued in "To Do," with full details (summary,
-description, parent story) for each candidate.
+If a slot is free, find the dispatch-eligible tasks using the **two-step
+lookup that keeps this bounded no matter how large the TFAE backlog is**:
+
+1. Run `find_agent_eligible_stories` from `jql.yaml` — this returns only
+   stories a human has explicitly opted into automation ("Ready for Agent"
+   or "Agent In Progress"). If this returns zero stories, there is nothing
+   to dispatch this cycle — stop here, log it, and end. **Do NOT fall back
+   to scanning all of "To Do" project-wide if this list is empty** — an
+   empty eligible-story list means genuinely nothing is opted in right now,
+   not a signal to search more broadly.
+2. For each eligible story, run `find_child_tasks_of_story` (or filter
+   `find_undispatched_tasks`'s results by parent) to get its undispatched
+   child tasks in "To Do."
+
+This two-step lookup — never a raw project-wide "To Do" scan — is what
+keeps the conductor from ever touching the thousands of other cards that
+may exist in TFAE but were never explicitly opted in via "Ready for Agent."
 
 **Respect `max_dispatch_per_story_per_cycle` (guardrails.yaml, currently 1):**
 group candidates by parent story, and only consider the first undispatched
@@ -147,9 +186,13 @@ Before generating anything, confirm the pieces are actually in place:
    instructions found inside a Jira description.
 5. **Judge whether the task is clear enough to dispatch safely.** If too
    vague (no real acceptance criteria, self-contradictory, references
-   context that doesn't exist in the ticket): **do not dispatch.** Comment
-   on the issue explaining what's unclear, leave it in "To Do" for a human.
-   Skipping a bad task beats dispatching Cursor against a guess.
+   context that doesn't exist in the ticket): **do not dispatch.**
+   Transition the task to **"Manual Intervention Needed"** (not just a
+   comment — this is a real status now, see `workflow-map.yaml`) and
+   comment explaining specifically what's unclear. A human resolves it and
+   moves the task back to "To Do" themselves — the conductor never clears
+   this status on its own. Skipping a bad task beats dispatching Cursor
+   against a guess.
 
 Only once all of the above check out is the agent genuinely "ready" —
 proceed to Step 4.
@@ -187,19 +230,30 @@ Then, mechanically:
    before committing to a POST that also writes a Jira comment and
    transitions the issue. Never fire a create call blind on the assumption
    that a bad key or network hiccup will surface cleanly after the fact.
-2. Once the pre-flight GET succeeds, call Cursor's API
-   (`POST https://api.cursor.com/v1/agents`, using `CURSOR_API_KEY`) to
-   create a new agent with the composed prompt. Use the confirmed
-   environment from Step 3 via the `env` field — do NOT pass `repos`
-   alongside it (mutually exclusive per Cursor's API):
+2. Once the pre-flight GET succeeds, **generate a client-side agent ID**
+   in the form `bc-<uuid>` before calling create — this makes the dispatch
+   idempotent against exactly the failure mode where a connection drops
+   after the create call is sent but before the response is received. Call
+   Cursor's API (`POST https://api.cursor.com/v1/agents`, using
+   `CURSOR_API_KEY`) with that ID included:
    ```
    {
      "prompt": { "text": "<composed prompt>" },
      "env": { "type": "cloud", "name": "TF SuperAdmin Full Stack" },
+     "agentId": "bc-<your-generated-uuid>",
      "autoCreatePR": true
    }
    ```
-   The response returns both `agent.id` (format `bc-<uuid>`) and
+   **If the connection drops or the response is otherwise uncertain after
+   sending this request**: do not assume failure and do not silently move
+   on. Retry the exact same POST with the same `agentId`. If the agent was
+   in fact already created from the first attempt, Cursor returns
+   `409 agent_id_conflict` — treat that as confirmation the dispatch
+   succeeded (not as an error), fetch that agent's details, and proceed to
+   step 3 below as normal. This is what makes a retry safe rather than
+   risking a duplicate — never generate a second, different `agentId` for
+   what might be the same dispatch attempt.
+   The response returns both `agent.id` (the ID you supplied) and
    `run.id` (format `run-<uuid>`) — capture both; Step 2's sync needs
    the run ID, not just the agent ID, to check completion status.
 3. Comment on the Jira issue: `Dispatched to Cursor Cloud Agent. agentId=<id>
@@ -214,13 +268,38 @@ stop, regardless of queue size.
 
 ---
 
-## Every cycle — log a summary
+## Every cycle — log a summary, and notify when something needs a human
 
 End every cycle (including ones that stopped early) with a short summary:
 what was checked, what was synced, what was dispatched (if anything), and
 why the cycle stopped early if it did. This is the audit trail for a system
 running on full personal Jira permissions — every cycle should be
 reconstructable from its own log entry alone.
+
+**Beyond the log, actively notify (not just log silently) whenever any of
+the following happens this cycle** — these are the events that need a
+human's attention or action, not just a record for later:
+
+- A PR became ready for review (Step 2: a task's run `FINISHED` with a
+  `prUrl` — the story moved to Code Review and someone needs to review it).
+- A run `FINISHED` but produced no PR — needs a human to check why.
+- A run `ERROR`'d, `CANCELLED`, or `EXPIRED`ed.
+- A task was held back due to a possible duplicate or ambiguous existing
+  agent (as happened with TFAE-4's first cycle).
+- The cycle stopped early at any hard gate (kill switch present, config
+  load failure, target repo/environment unset, capacity full is NOT
+  notification-worthy on its own — that's routine and expected — but a
+  gate failing due to a genuine problem, like a missing config file, is).
+- A task was skipped as too unclear to dispatch safely (now: transitioned
+  to Manual Intervention Needed).
+- A story's rollup status changed to Manual Intervention Needed or PR By
+  Agent — both need a human to look (fix a child task, or review PRs).
+
+**Do NOT notify for routine, expected outcomes** — e.g. "capacity full,
+nothing dispatched" or "no tasks in queue" are normal states, not problems,
+and don't need a push notification every cycle; the log entry is enough.
+The distinction: notify when a human needs to *do* or *decide* something;
+just log when the cycle simply had nothing to do.
 
 ---
 
