@@ -11,10 +11,42 @@
 
 queries:
 
+  find_agent_eligible_stories:
+    description: >
+      Stories currently opted into automation — either freshly marked
+      "Ready for Agent" (nothing dispatched yet) or already "Agent In
+      Progress" (dispatch underway, sibling tasks may still need picking
+      up). This — NOT "To Do" project-wide — is the real dispatch queue
+      boundary. It's what keeps the conductor from ever touching the
+      thousands of other cards that exist in TFAE but were never opted in.
+      A story only becomes eligible when a human manually moves it to
+      "Ready for Agent" — the conductor never picks that status itself.
+    jql: >
+      project = {project_key} AND issuetype = Story
+      AND status in ("Ready for Agent", "Agent In Progress")
+
+  find_child_tasks_of_story:
+    description: >
+      All child tasks under one specific story. Used two ways: (1)
+      combined with find_agent_eligible_stories to build the actual
+      dispatch-eligible task list (see find_undispatched_tasks note below),
+      and (2) to compute a story's rollup status each cycle (Manual
+      Intervention Needed / PR By Agent / Agent In Progress / Ready for
+      Agent — see workflow-map.yaml). {story_key} is filled in per-story
+      at runtime, not from guardrails.yaml.
+    jql: >
+      project = {project_key} AND parent = {story_key}
+
   find_undispatched_tasks:
     description: >
-      Tasks sitting in "To Do" that haven't been picked up yet. This is the
-      conductor's dispatch queue.
+      Raw candidate tasks in "To Do" project-wide. IMPORTANT: this query
+      alone is NOT the dispatch queue — it must be intersected against
+      find_agent_eligible_stories's results (by parent) before anything
+      here is actually dispatchable. A task in "To Do" whose parent story
+      was never moved to "Ready for Agent" must NEVER be dispatched, no
+      matter how this query looks in isolation. See
+      routines/conductor-routine-prompt.md Step 2 for the two-step lookup
+      this feeds into.
     jql: >
       project = {project_key} AND status = "To Do" AND issuetype != Story
 
