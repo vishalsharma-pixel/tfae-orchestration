@@ -49,6 +49,58 @@ Jira permissions rather than a scoped service account.
   never to whether a guardrail applies.
 
 ### Resolved
+- **Real dispatch-queue scale fix.** The conductor previously scanned
+  "To Do" project-wide (`find_undispatched_tasks`), which would have been
+  genuinely dangerous once TFAE holds hundreds/thousands of cards — no
+  boundary existed on what automation could touch. Added an explicit
+  opt-in gate: a new `find_agent_eligible_stories` query returns only
+  stories a human has moved to "Ready for Agent," and only tasks under
+  those stories (via `find_child_tasks_of_story`) are ever dispatch
+  candidates. An empty eligible-story list now means "genuinely nothing
+  opted in" — the conductor stops rather than falling back to a broader
+  scan.
+- **Four new Jira statuses added to the workflow design**: `Ready for
+  Agent` (manual entry gate, story-only), `Agent In Progress` (system,
+  story-only, fires on first child dispatch), `Manual Intervention Needed`
+  (system, BOTH story and task level — task-level for dispatch/execution
+  failures, story-level whenever any child needs it), `PR By Agent`
+  (system, story-only, fires once all children reach Code Review or
+  later). Full state machine and transition rules in
+  `config/workflow-map.yaml`; Jira admin setup steps added to
+  `docs/getting-started.md` under "Scaling setup."
+- **Story status rollup added** — computed fresh every cycle from actual
+  child-task state, never remembered from a prior decision. Priority
+  order: Manual Intervention Needed > PR By Agent > Agent In Progress >
+  Ready for Agent. A story recovers from Manual Intervention Needed
+  automatically once every flagged child task is cleared by a human — no
+  separate manual action needed on the story.
+- Task-level "too unclear to dispatch" (Step 3) and Cursor run
+  ERROR/CANCELLED/EXPIRED (Step 2) now transition the task to "Manual
+  Intervention Needed" as a real status, not just a Jira comment while
+  silently sitting in "To Do."
+- Notification policy updated to include story rollup changes to Manual
+  Intervention Needed or PR By Agent as notification-worthy events.
+- **Explicit notification policy added — closes a real gap.** The Routine
+  previously had a generic "log a summary" instruction with no explicit
+  rule for when to actively notify versus just log silently. In practice
+  it notified on some blocking-gate cycles by its own judgment, but nothing
+  said a finished PR (which needs a human's review) was equally
+  notification-worthy — an inconsistency, since a completed task needing
+  review is at least as actionable as a stuck cycle. Added an explicit list
+  of notification-worthy events (PR ready for review, run
+  finished-without-PR, run errored/cancelled/expired, duplicate-agent
+  holds, genuine gate failures, unclear tasks skipped) versus routine
+  non-events that should just log quietly (capacity full, empty queue).
+- **Idempotent dispatch added, closing a real gap surfaced by the first
+  live dispatch.** During the Routine's first actual dispatch, a
+  connection drop occurred between sending the create-agent call and
+  receiving its response — it happened to recover safely by checking
+  rather than assuming, but nothing previously guaranteed that. Step 4 now
+  generates a client-supplied `agentId` (`bc-<uuid>`) before every create
+  call; if a retry is needed after an uncertain response, it reuses the
+  same ID rather than generating a new one, so Cursor's API returns
+  `409 agent_id_conflict` on the retry instead of silently creating a
+  duplicate agent for the same task.
 - **Confirmed real Cursor API field names, replacing all guessed
   placeholders** (`agent.status`/`prUrl` were never real fields — the
   actual shape is `run.status` on `GET /v1/agents/{id}/runs/{runId}`, with
