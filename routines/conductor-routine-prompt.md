@@ -63,7 +63,12 @@ from `jql.yaml`, get every TFAE task currently "In Progress." For each one:
    pattern `agentId=<value>` (written by this Routine on a previous
    dispatch). If no such comment exists, this task was moved to "In
    Progress" some other way — skip it, it's not this Routine's to sync.
-2. Call Cursor's API to check that agent's current status.
+2. **GET the agent's current status** from Cursor's API
+   (`GET https://api.cursor.com/v1/agents/<agentId>`) before doing anything
+   else with it. If this GET fails (network error, agent ID not found,
+   auth issue): comment on the Jira issue that the agent status couldn't be
+   retrieved this cycle, and leave the task as-is — don't guess a status or
+   assume it's still running.
 3. **If finished with a PR**: comment the PR link on the Jira issue, and
    transition per `workflow-map.yaml`'s `transition_triggers` (In Progress
    → Code Review).
@@ -101,11 +106,12 @@ Pick the single next task (oldest first is a reasonable default tie-break).
 Before generating anything, confirm the pieces are actually in place:
 
 1. **Target repository**: the task's work needs to land in the actual TFAE
-   app codebase on Bitbucket Cloud — **⚠️ NOT YET DECIDED.** This is a
-   completely different repository from `tfae-orchestration` (this
-   Routine's own GitHub-hosted config repo) — never dispatch Cursor against
-   the config repo. **If the real target repo is still unset when this
-   Routine runs, stop here and flag it rather than guessing.**
+   app codebase on Bitbucket Cloud — **CONFIRMED:
+   `trulyfree-marketplace/superadmin-react-portal`** (the frontend Admin
+   portal). Use this exact workspace/repo path when calling Cursor's API.
+   This is a separate repository from `tfae-orchestration` (this Routine's
+   own GitHub-hosted config repo) — never dispatch Cursor against the
+   config repo.
 2. **Source control connection**: confirm Bitbucket Cloud is connected as a
    source control provider under Cursor's own account integrations — a
    separate one-time setup step from the API key, done on Cursor's side,
@@ -152,13 +158,24 @@ real dispatches show what's actually missing.*
 
 Then, mechanically:
 
-1. Call Cursor's API (`api.cursor.com`, using `CURSOR_API_KEY`) to create a
-   new agent with the composed prompt, targeting the confirmed repo from
-   Step 3.
-2. Comment on the Jira issue: `Dispatched to Cursor Cloud Agent. agentId=<id>
+1. **Pre-flight check first**: before creating anything, call Cursor's API
+   with a lightweight `GET https://api.cursor.com/v1/me` (using
+   `CURSOR_API_KEY`) to confirm the key is valid and the API is reachable.
+   **If this fails for any reason, stop here — do not attempt the create
+   call.** Log the failure and end the cycle without dispatching. This is a
+   deliberate second, independent check alongside Step 3's Jira-comment
+   dedup check — confirming Cursor itself is reachable and authenticated
+   before committing to a POST that also writes a Jira comment and
+   transitions the issue. Never fire a create call blind on the assumption
+   that a bad key or network hiccup will surface cleanly after the fact.
+2. Once the pre-flight GET succeeds, call Cursor's API
+   (`POST https://api.cursor.com/v1/agents`, using `CURSOR_API_KEY`) to
+   create a new agent with the composed prompt, targeting the confirmed
+   repo from Step 3.
+3. Comment on the Jira issue: `Dispatched to Cursor Cloud Agent. agentId=<id>
    runId=<id>` — this exact format is what Step 2's sync logic parses on
    future cycles, so don't reword it.
-3. Transition the issue to "In Progress" per `workflow-map.yaml`.
+4. Transition the issue to "In Progress" per `workflow-map.yaml`.
 
 Do not dispatch a second task even if capacity remains — see
 `dispatch_batch_size: 1` in guardrails.yaml. One dispatch per cycle, full
