@@ -66,6 +66,83 @@ statuses:
     pipeline_stage: shipped
     notes: Terminal state, outside this pipeline's concern.
 
+  # --- Automation opt-in and rollup statuses (story level, plus one that
+  # also applies at task level) — added once real dispatch was confirmed
+  # working end to end. These require adding new statuses to TFAE's Jira
+  # workflow (an admin action) — see docs/getting-started.md for the setup
+  # steps. Confirm with your Jira admin whether these get added to the
+  # existing shared Story/Task workflow, or a separate Story-only workflow
+  # within the same scheme — either works, but the shared-workflow route is
+  # simpler if Ready for Agent / Agent In Progress / PR By Agent will just
+  # never be manually applied to a Task by convention.
+
+  - name: Ready for Agent
+    pipeline_stage: agent_eligible
+    scope: story_only
+    notes: >
+      MANUAL entry gate, set by a human — never set by the conductor. This
+      is the actual opt-in mechanism that keeps automation from touching
+      the whole TFAE backlog: only tasks whose parent story is in this
+      status (or "Agent In Progress") are ever considered for dispatch.
+      A story sits here once it's fully groomed — every child task written
+      clearly enough to pass Step 3's dispatch-readiness check.
+
+  - name: Agent In Progress
+    pipeline_stage: agent_dispatching
+    scope: story_only
+    notes: >
+      SYSTEM-set automatically, as soon as the FIRST child task under this
+      story gets dispatched (not waiting for all of them). Recomputed
+      fresh every cycle as part of the story rollup — see
+      "Story status rollup" below. Story stays eligible for its remaining
+      undispatched sibling tasks while in this status (see
+      find_agent_eligible_stories in jql.yaml).
+
+  - name: Manual Intervention Needed
+    pipeline_stage: blocked_needs_human
+    scope: story_and_task
+    notes: >
+      Applies at BOTH levels. At the task level: set when a task can't be
+      safely dispatched (Step 3's "too unclear" check), or when a
+      dispatched task's Cursor run ends in ERROR/CANCELLED/EXPIRED, or when
+      a possible duplicate agent is found and held (see
+      routines/conductor-routine-prompt.md). At the story level: set
+      automatically whenever ANY child task is in this status — this is
+      the top-priority state in the rollup (see below), overriding
+      "Agent In Progress" or "PR By Agent" until every flagged child task
+      is resolved by a human and moved back to "To Do."
+      Distinct from the existing `needs-human-review` label
+      (guardrails.yaml) — that label is specifically for a story that hit
+      `max_qa_cycles_per_story`; this status is for dispatch/execution
+      problems, a different failure mode with a different cause.
+
+  - name: PR By Agent
+    pipeline_stage: agent_prs_ready
+    scope: story_only
+    notes: >
+      SYSTEM-set automatically once EVERY child task under the story has
+      reached "Code Review" or later (Code Review, Ready To Test, Testing,
+      Ready for Production, LIVE — i.e. none remain in To Do, In Progress,
+      or Manual Intervention Needed). Signals "every task's code is
+      implemented and has a PR open, waiting on your review" — distinct
+      from the existing "all children reached Ready To Test" signal
+      (docs/getting-started.md Step 6), which means code review is DONE
+      and the story is ready for a manual QA pass. PR By Agent is the
+      earlier, "review the code" signal; Ready To Test rollup is the later
+      "review the working feature" signal.
+
+# --- Story status rollup — recomputed fresh every conductor cycle ---
+# Never remembered from a previous cycle's decision; always derived live
+# from the current state of all child tasks under the story. Priority
+# order (top wins if multiple conditions are true at once):
+#   1. Manual Intervention Needed — if ANY child task is in this status
+#   2. PR By Agent — else if ALL child tasks are Code Review or later
+#   3. Agent In Progress — else if AT LEAST ONE child task has left "To Do"
+#   4. Ready for Agent — else (nothing dispatched yet, story unchanged)
+# This priority order is deliberate: a single stuck task should never be
+# masked by other tasks looking fine — Manual Intervention Needed always
+# wins until every flagged child is cleared by a human.
+
 # Bug loop note:
 # Bugs found in manual QA are NOT a new status — they're new Subtask issues
 # created under the story, landing in "To Do" like any other task. The bug
@@ -103,8 +180,61 @@ transition_triggers:
     to: Ready for Production
     trigger: Manual QA pass succeeds.
   - from: Testing
-    to: Ready To Test
+    to: Testing
     trigger: >
       Manual QA pass fails: increment "QA Cycle Count" by 1, file a bug
-      subtask (lands in To Do), move story back to Ready To Test (or leave
-      in Testing — decide one convention and apply it consistently).
+      subtask (lands in To Do). Story stays in "Testing" — it does NOT
+      bounce back to "Ready To Test". This keeps the story's board position
+      stable while the bug subtask gets worked through the normal dispatch
+      queue underneath it. Story only leaves "Testing" once QA passes, or
+      once it hits max_qa_cycles_per_story and gets the needs-human-review
+      label instead (see guardrails.yaml).
+
+  # --- New transitions for the automation opt-in / rollup statuses ---
+  - from: [Idea, To Do]
+    to: Ready for Agent
+    trigger: >
+      MANUAL. A human decides a story is fully groomed (every child task
+      has clear acceptance criteria) and explicitly opts it into
+      automation. The conductor never sets this itself.
+  - from: Ready for Agent
+    to: Agent In Progress
+    trigger: >
+      SYSTEM. Fires the moment the first child task under the story gets
+      dispatched. Recomputed as part of the story rollup every cycle, not
+      a one-time flip — see the "Story status rollup" note above.
+  - from: [Agent In Progress, Ready for Agent]
+    to: Manual Intervention Needed
+    trigger: >
+      SYSTEM. Fires when any child task under the story enters Manual
+      Intervention Needed (task-level). Top priority in the rollup —
+      overrides Agent In Progress or PR By Agent until every flagged task
+      is cleared.
+  - from: Manual Intervention Needed
+    to: Agent In Progress
+    trigger: >
+      SYSTEM (automatic rollup, not a manual action). Once a human clears
+      every flagged child task (moves them back to "To Do" or further
+      along), the story rollup naturally recomputes to Agent In Progress
+      (or PR By Agent, if that condition is now also met) on the next
+      cycle — no separate human action needed on the story itself.
+  - from: Agent In Progress
+    to: PR By Agent
+    trigger: >
+      SYSTEM. Fires once every child task under the story has reached
+      "Code Review" or later. Recomputed every cycle as part of the
+      rollup — see the "Story status rollup" note above.
+  - from: [To Do, In Progress]
+    to: Manual Intervention Needed
+    trigger: >
+      TASK-LEVEL. SYSTEM. Fires when: (a) Step 3 judges the task too
+      unclear to dispatch safely, (b) a dispatched task's Cursor run ends
+      in ERROR/CANCELLED/EXPIRED, or (c) a possible duplicate Cursor agent
+      is found and the dispatch is held pending human review.
+  - from: Manual Intervention Needed
+    to: To Do
+    trigger: >
+      TASK-LEVEL. MANUAL. A human resolves whatever was unclear or broken
+      and moves the task back to "To Do" — the conductor picks it up again
+      on a future cycle like any other queued task. The conductor never
+      clears this status itself.
