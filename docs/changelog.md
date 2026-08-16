@@ -49,6 +49,20 @@ Jira permissions rather than a scoped service account.
   never to whether a guardrail applies.
 
 ### Resolved
+- **Confirmed real Cursor API field names, replacing all guessed
+  placeholders** (`agent.status`/`prUrl` were never real fields — the
+  actual shape is `run.status` on `GET /v1/agents/{id}/runs/{runId}`, with
+  `FINISHED`/`ERROR`/`CANCELLED`/`EXPIRED`/`RUNNING`/`CREATING` values, and
+  PR links live nested at `run.git.branches[].prUrl`, not a flat field).
+  `routines/conductor-routine-prompt.md` Steps 2 and 4 updated to match
+  the confirmed OpenAPI schema exactly.
+- **Cursor environment confirmed**: `TF SuperAdmin Full Stack` — the named
+  Cursor Cloud Agent environment tied to `superadmin-react-portal`'s repo,
+  install script, secrets, and Build snapshots. Step 4's dispatch call now
+  uses `env: {type: "cloud", name: "TF SuperAdmin Full Stack"}` instead of
+  a raw `repos` array (the two are mutually exclusive on Cursor's API) —
+  this ties every dispatch to the pre-built Build rather than booting a
+  bare environment from scratch each time.
 - **Target Bitbucket repo confirmed**:
   `trulyfree-marketplace/superadmin-react-portal` (the frontend Admin
   portal). `routines/conductor-routine-prompt.md` Step 3 updated from
