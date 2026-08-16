@@ -83,10 +83,68 @@ steps 1–3 was wrong, this is where it surfaces cheaply.
 criteria are too vague to verify automatically, or if a task's scope was
 unclear — problems worth catching before any automation inherits them.
 
+## Scaling setup — required before using this across many stories
+
+Added after the first live dispatch worked end to end (TFAE-4) and
+surfaced a real problem: without an explicit opt-in gate, the conductor's
+dispatch queue was "every task in To Do project-wide" — fine for one test
+task, genuinely risky once TFAE has hundreds or thousands of cards. This
+step adds that gate. Do this before relying on the conductor across your
+real backlog, even if you skip it for continued small-scale testing.
+
+**1. Add four new Jira statuses to TFAE's workflow** (admin action):
+- `Ready for Agent` — a human moves a story here once it's fully groomed
+  (every child task has clear acceptance criteria). This is the only entry
+  point into automation — nothing gets dispatched unless its parent story
+  is in this status or the next one.
+- `Agent In Progress` — set automatically by the conductor once the first
+  child task under a story is dispatched.
+- `Manual Intervention Needed` — applies at BOTH story and task level. Set
+  automatically when a task can't be safely dispatched, a Cursor run fails,
+  or a possible duplicate agent is found; the story reflects it too
+  whenever any child task is in this state.
+- `PR By Agent` — set automatically once every child task under a story
+  has reached Code Review or later.
+
+Ask your Jira admin whether these go into TFAE's existing shared
+Story/Task workflow (simpler — the three story-only statuses just never
+get manually applied to a Task by convention) or a separate Story-only
+workflow within the same scheme (cleaner separation, more setup). Either
+works — see `config/workflow-map.yaml` for the full state machine and
+transition rules once the statuses exist.
+
+**2. Confirm the transitions exist** between: Idea/To Do → Ready for
+Agent (manual), Ready for Agent ↔ Agent In Progress, Agent In Progress ↔
+Manual Intervention Needed, Agent In Progress → PR By Agent, and at the
+task level, To Do ↔ Manual Intervention Needed. The conductor's automated
+transitions will fail if a valid transition path doesn't exist between the
+current and target status.
+
+**3. Test the opt-in gate itself** before trusting it at scale: move one
+real story to "Ready for Agent," confirm the conductor's next cycle finds
+its tasks (via `find_agent_eligible_stories` + `find_child_tasks_of_story`
+in `jql.yaml`) and dispatches from them — and just as importantly, confirm
+it does NOT pick up tasks under any *other* story still sitting in a
+normal "To Do" status without ever being marked "Ready for Agent."
+
+**Why this matters more than it might seem**: this gate is now the entire
+answer to "how do we not let this blindly pick every card in a project
+with thousands of them" — worth treating as a hard requirement, not an
+optional nicety, before pointing the conductor at your real backlog.
+
 ## Step 7 — Turn on the conductor, capped and slow
 
 Only after steps 1–6 have each been confirmed once by hand:
 
+- **Create/configure the Cloud Environment first**, before creating the
+  Routine itself. This is NOT in the Routine's own creation form — go to
+  **claude.ai/code**, find the small cloud icon **above the message box**
+  (shows the current environment's name), click it, then **Add cloud
+  environment** or the settings icon on an existing one. There's no direct
+  URL or separate settings page for this — it's only reachable from that
+  icon. In the dialog: set **Network access** to Custom and add
+  `api.cursor.com`; under **Environment variables** (`.env` format, one
+  `KEY=value` per line) add `CURSOR_API_KEY=<your key>`.
 - Set the concurrency cap (2–3 agents in flight, system-wide).
 - Set the schedule (every 20–30 minutes is a reasonable start — slower is
   fine, there's no rush).
