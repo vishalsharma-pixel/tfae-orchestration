@@ -59,25 +59,37 @@ cycle.
 First, **sync anything already in flight**: using `find_dispatched_tasks`
 from `jql.yaml`, get every TFAE task currently "In Progress." For each one:
 
-1. Find its dispatched agent's reference — a Jira comment matching the
-   pattern `agentId=<value>` (written by this Routine on a previous
-   dispatch). If no such comment exists, this task was moved to "In
-   Progress" some other way — skip it, it's not this Routine's to sync.
-2. **GET the agent's current status** from Cursor's API
-   (`GET https://api.cursor.com/v1/agents/<agentId>`) before doing anything
-   else with it. If this GET fails (network error, agent ID not found,
-   auth issue): comment on the Jira issue that the agent status couldn't be
-   retrieved this cycle, and leave the task as-is — don't guess a status or
-   assume it's still running.
-3. **If finished with a PR**: comment the PR link on the Jira issue, and
-   transition per `workflow-map.yaml`'s `transition_triggers` (In Progress
-   → Code Review).
-4. **If failed or errored**: comment the failure on the issue, summarizing
-   *why* in plain language from Cursor's error output. Do not re-dispatch
-   automatically — that's a human decision.
-5. **If running longer than `staleness_timeout_hours`** with no change:
-   flag it as possibly stalled in a comment. Still counts as occupying a
-   concurrency slot — do not treat it as free capacity.
+1. Find its dispatched agent and run references — a Jira comment matching
+   the pattern `agentId=<value> runId=<value>` (written by this Routine on
+   a previous dispatch). If no such comment exists, this task was moved to
+   "In Progress" some other way — skip it, it's not this Routine's to sync.
+2. **GET the run's current status** (not the agent's — completion state
+   lives on the run) from Cursor's API:
+   `GET https://api.cursor.com/v1/agents/<agentId>/runs/<runId>`.
+   If this GET fails (network error, run ID not found, auth issue):
+   comment on the Jira issue that the status couldn't be retrieved this
+   cycle, and leave the task as-is — don't guess a status or assume it's
+   still running.
+3. **Read `run.status`.** Values are `CREATING`, `RUNNING`, `FINISHED`,
+   `ERROR`, `CANCELLED`, `EXPIRED`.
+   - **If `FINISHED`**: check `run.git.branches[]` for an entry with a
+     `prUrl` (an agent can push multiple branches — look across all
+     entries). If a `prUrl` is present, comment that PR link on the Jira
+     issue, and transition per `workflow-map.yaml`'s `transition_triggers`
+     (In Progress → Code Review). If `FINISHED` but no `prUrl` appears in
+     any branch entry, comment that the run finished without opening a PR
+     and flag for a human to check — don't assume Code Review is correct
+     without an actual PR link.
+   - **If `ERROR` or `CANCELLED`**: comment the failure on the issue,
+     summarizing *why* in plain language using `run.result` if present. Do
+     not re-dispatch automatically — that's a human decision.
+   - **If `EXPIRED`**: treat the same as a failure — comment and flag,
+     don't silently drop it.
+   - **If `CREATING` or `RUNNING`**: still in flight, no action needed
+     this cycle beyond the staleness check below.
+4. **If running (`CREATING`/`RUNNING`) longer than `staleness_timeout_hours`**
+   with no change: flag it as possibly stalled in a comment. Still counts
+   as occupying a concurrency slot — do not treat it as free capacity.
 
 Then, **count current capacity**: how many TFAE tasks are "In Progress"
 **with a valid agentId comment** (i.e. actually dispatched by this Routine,
@@ -105,13 +117,20 @@ Pick the single next task (oldest first is a reasonable default tie-break).
 
 Before generating anything, confirm the pieces are actually in place:
 
-1. **Target repository**: the task's work needs to land in the actual TFAE
-   app codebase on Bitbucket Cloud — **CONFIRMED:
-   `trulyfree-marketplace/superadmin-react-portal`** (the frontend Admin
-   portal). Use this exact workspace/repo path when calling Cursor's API.
-   This is a separate repository from `tfae-orchestration` (this Routine's
-   own GitHub-hosted config repo) — never dispatch Cursor against the
-   config repo.
+1. **Target repository + environment**: the task's work needs to land in
+   the actual TFAE app codebase — **CONFIRMED:**
+   - Repo: `trulyfree-marketplace/superadmin-react-portal` (Bitbucket
+     Cloud, the frontend Admin portal)
+   - Cursor environment name: **`TF SuperAdmin Full Stack`** — use this via
+     the `env` parameter (`{"type": "cloud", "name": "TF SuperAdmin Full
+     Stack"}`) on the Create Agent call, NOT a raw `repos` array. Naming
+     the environment ties the dispatch to its pre-built Cursor Build
+     (repo already cloned, dependencies installed, secrets configured) —
+     `env` and `repos` are mutually exclusive on Cursor's API, so don't
+     pass both.
+   - This is a separate repository/environment from `tfae-orchestration`
+     (this Routine's own GitHub-hosted config repo) — never dispatch
+     Cursor against the config repo or use its name as the environment.
 2. **Source control connection**: confirm Bitbucket Cloud is connected as a
    source control provider under Cursor's own account integrations — a
    separate one-time setup step from the API key, done on Cursor's side,
@@ -137,7 +156,7 @@ proceed to Step 4.
 
 ---
 
-## Step 4 — Generate the Cursor prompt and dispatch { needs refinement — draft below }
+## Step 4 — Generate the Cursor prompt and dispatch
 
 Compose a scoped prompt for the Cursor Cloud Agent from the task's actual
 content (not a rigid template — use judgment on how much context it needs),
@@ -151,10 +170,10 @@ including at minimum these instructions:
   it (see `workflow-map.yaml`: Code Review → Ready To Test requires a
   human merge, this Routine/agent never merges).
 
-*This step is intentionally left light — flesh out with more specific
-prompt-composition guidance (e.g. how much repo context to include, how to
-handle a task that references other in-flight tasks) once the first few
-real dispatches show what's actually missing.*
+*This step's prompt-composition guidance (what context to include, how to
+handle tasks referencing other in-flight work) may still get refined after
+more real dispatches — but the dispatch mechanics below are now concrete,
+confirmed against Cursor's actual API schema.*
 
 Then, mechanically:
 
@@ -170,11 +189,23 @@ Then, mechanically:
    that a bad key or network hiccup will surface cleanly after the fact.
 2. Once the pre-flight GET succeeds, call Cursor's API
    (`POST https://api.cursor.com/v1/agents`, using `CURSOR_API_KEY`) to
-   create a new agent with the composed prompt, targeting the confirmed
-   repo from Step 3.
+   create a new agent with the composed prompt. Use the confirmed
+   environment from Step 3 via the `env` field — do NOT pass `repos`
+   alongside it (mutually exclusive per Cursor's API):
+   ```
+   {
+     "prompt": { "text": "<composed prompt>" },
+     "env": { "type": "cloud", "name": "TF SuperAdmin Full Stack" },
+     "autoCreatePR": true
+   }
+   ```
+   The response returns both `agent.id` (format `bc-<uuid>`) and
+   `run.id` (format `run-<uuid>`) — capture both; Step 2's sync needs
+   the run ID, not just the agent ID, to check completion status.
 3. Comment on the Jira issue: `Dispatched to Cursor Cloud Agent. agentId=<id>
-   runId=<id>` — this exact format is what Step 2's sync logic parses on
-   future cycles, so don't reword it.
+   runId=<id>` — using the real `agent.id` and `run.id` from the create
+   response above. This exact format is what Step 2's sync logic parses
+   on future cycles, so don't reword it.
 4. Transition the issue to "In Progress" per `workflow-map.yaml`.
 
 Do not dispatch a second task even if capacity remains — see
