@@ -1,0 +1,64 @@
+# repo-map.yaml
+#
+# Maps a Jira field value to the Cursor target for that task's work. Added
+# after the conductor's first real multi-repo backlog cycle (TFAE-5 through
+# TFAE-8, later recreated as TFAE-9/10/11) surfaced that a single hardcoded
+# target (superadmin-react-portal) doesn't scale — most real work spans
+# multiple repos and environments.
+#
+# ACTUAL FIELD: `customfield_10321`, labeled "Component" in the UI — this
+# is a FREE-TEXT custom field, NOT Jira's native Components dropdown
+# (confirmed against a real issue, TFAE-10/11). This matters: a native
+# dropdown can't contain a typo, free text can. Every value here MUST be
+# typed to match a key below EXACTLY — same discipline as every other
+# string match in this repo (kill switch label, workflow status names).
+# Confirmed working so far: TFAE-10 = "node-monolith-api",
+# TFAE-11 = "seller-v2-new-campaigns", both exact matches.
+#
+# Step 3 of routines/conductor-routine-prompt.md reads customfield_10321
+# on a task and looks it up here. If the field is empty, or its value
+# isn't a key below (including a near-miss typo), per Step 3's existing
+# hard-gate rule: STOP, do not guess, flag for a human — do not fall back
+# to any default target.
+
+targets:
+
+  superadmin-react-portal:
+    description: >
+      Frontend Admin portal work (TFAE-4 and similar admin-frontend tasks).
+    dispatch_mode: new_agent
+    repo: trulyfree-marketplace/superadmin-react-portal
+    cursor_environment: "TF SuperAdmin Full Stack"
+
+  node-monolith-api:
+    description: >
+      Backend API work on the Node monolith (e.g. TFAE-7's promotions
+      status enum reconciliation).
+    dispatch_mode: new_agent
+    repo: trulyfree-marketplace/node-monolith-api
+    cursor_environment: "Promotion Node and Python Partners"
+    # NOTE: environment name as reported in the blocked cycle — confirm
+    # this exact string against Cursor's dashboard before relying on it,
+    # the same way "TF SuperAdmin Full Stack" was confirmed earlier.
+
+  seller-v2-new-campaigns:
+    description: >
+      Seller V2 New Campaigns wizard work (e.g. TFAE-11's Flat Fee +
+      Commission field mapping) — this one is NOT a fresh dispatch, it
+      continues an already-existing Cursor agent/branch.
+    dispatch_mode: follow_up_existing_agent
+    existing_agent_id: "bc-02735464-f4e9-419f-88eb-0af659371ebc"
+    existing_agent_branch: "vishal/creator-campaign-listing-detail-flow-1ebc"
+    # CONFIRMED — real agent ID verified against the actual branch name
+    # before being recorded here, not guessed from the human-readable
+    # "Seller V2 - New Campaigns" label alone. Step 3's hard gate can now
+    # let TFAE-11 (and any other task mapped to this Component) proceed
+    # to Step 4's follow_up_existing_agent dispatch path.
+
+# Dispatch mode meanings (see routines/conductor-routine-prompt.md Step 4):
+#   new_agent              — create a brand-new Cursor agent (the only mode
+#                             that existed before this file was added).
+#   follow_up_existing_agent — send a new run to an ALREADY-EXISTING agent
+#                             (a follow-up prompt on the same agent/branch)
+#                             instead of creating a new one. Requires a
+#                             real, confirmed agent ID — never guessed.
