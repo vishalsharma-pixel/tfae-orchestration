@@ -48,6 +48,75 @@ Jira permissions rather than a scoped service account.
   specifically to reading task content and composing the Cursor prompt,
   never to whether a guardrail applies.
 
+### Added
+- **`config/repo-map.yaml`** — resolves per-task Cursor targets instead of
+  one hardcoded repo. Added after the conductor's first real multi-repo
+  cycle (TFAE-5 through TFAE-8) blocked correctly rather than guessing,
+  exposing that a single hardcoded target doesn't scale. Keyed by Jira's
+  structured **Component** field (deliberately not a label — Component is
+  a visible, structured choice at ticket-creation time). Supports two
+  dispatch modes: `new_agent` (the only mode that existed before) and
+  `follow_up_existing_agent` (continues an already-existing agent/branch
+  instead of creating a new one — needed for TFAE-8's case). A task with
+  no Component, or an unmapped one, stops and flags rather than guessing
+  a target — same hard-gate philosophy as everything else in this build.
+  `docs/story-task-template.md` updated to require Component on every task.
+
+### Known open item (surfaced by this fix, not yet resolved)
+- **Story/Task hierarchy mismatch**: TFAE-6/7/8 are linked to TFAE-5 via
+  "Relates" issue links, not the native `parent` field — because `Story`
+  and `Task` are both `hierarchyLevel: 0` in this project (siblings, not
+  parent/child; only `Subtask` can natively hold `parent` to a Story).
+  This means `find_child_tasks_of_story`'s `parent = {story_key}` query
+  currently finds zero children for TFAE-5, even though TFAE-7/TFAE-8 are
+  genuinely ready to dispatch. Two fix paths identified, neither applied
+  yet pending a decision: (1) convert future child work items to issue
+  type `Subtask` with a real `parent` field (aligns with how
+  `workflow-map.yaml` already treats QA bug tickets — the cleaner, more
+  native fix, but requires converting existing live tickets via Jira's
+  "Move" wizard, not a simple API field edit), or (2) redesign the
+  lookup around "Relates" links instead of `parent` (avoids touching
+  existing tickets, but issue links aren't cleanly filterable in plain
+  JQL, requiring per-story `issuelinks` fetches instead of a clean query
+  — harder to keep bounded at scale).
+- **`node-monolith-api`'s Cursor environment name** in `repo-map.yaml`
+  ("Promotion Node and Python Partners") is taken from the blocked
+  cycle's report, not independently confirmed against Cursor's dashboard
+  — same caution as the earlier "TF SuperAdmin Full Stack" confirmation.
+- **`seller-v2-new-campaigns`'s existing agent reference** is still just a
+  human-readable name ("Seller V2 - New Campaigns"), not a confirmed
+  `bc-<uuid>`. Step 3 is written to stop and flag rather than guess an ID
+  from this name — needs the real ID before TFAE-8 can dispatch.
+
+### Resolved
+- **`seller-v2-new-campaigns` existing agent confirmed**:
+  `bc-02735464-f4e9-419f-88eb-0af659371ebc`, branch
+  `vishal/creator-campaign-listing-detail-flow-1ebc` — verified against the
+  real branch name (not guessed from the human-readable "Seller V2 - New
+  Campaigns" label) before being recorded in `repo-map.yaml`. This was the
+  last blocker on TFAE-11's dispatch path; `dispatch_mode:
+  follow_up_existing_agent` can now proceed for real.
+- **TFAE-9/10/11 confirmed working correctly**: real native `Subtask` type
+  under TFAE-5's `parent` field (not "Relates" links) — `find_child_tasks_of_story`'s
+  `parent =` query finds these. TFAE-9 correctly carried over its real
+  progress (Code Review) rather than resetting — avoided a duplicate
+  dispatch on already-completed work.
+- **Corrected `repo-map.yaml`'s field assumption**: the "Component" field
+  is actually `customfield_10321`, a FREE-TEXT custom field, not Jira's
+  native Components dropdown as originally assumed. Real reliability
+  difference — free text has no typo protection. Confirmed working on
+  TFAE-10 (`node-monolith-api`) and TFAE-11 (`seller-v2-new-campaigns`),
+  both exact matches. All references updated to cite `customfield_10321`
+  explicitly.
+
+### Open question raised (not yet answered)
+- **Unplanned field discovered**: `customfield_10287`, labeled "Agent
+  Sessions," exists on these issues (currently empty on TFAE-10/11) but
+  was never part of this build's design. Could potentially replace the
+  comment-regex-based `agentId=`/`runId=` tracking in Step 2 with a real
+  structured field — worth deciding whether to adopt it, once its
+  origin/intended use is confirmed.
+
 ### Resolved
 - **Real dispatch-queue scale fix.** The conductor previously scanned
   "To Do" project-wide (`find_undispatched_tasks`), which would have been
