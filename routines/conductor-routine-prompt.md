@@ -28,6 +28,8 @@ cloned fresh at the start of every run. Read the current contents of:
 - `config/guardrails.yaml`
 - `config/jql.yaml`
 - `config/workflow-map.yaml`
+- `config/repo-map.yaml` (added after the first multi-repo cycle — resolves
+  per-task Cursor targets, see Step 3)
 
 directly from the local clone — do not rely on a cached or remembered
 version from a previous run. This is what makes a config change (e.g.
@@ -156,20 +158,32 @@ Pick the single next task (oldest first is a reasonable default tie-break).
 
 Before generating anything, confirm the pieces are actually in place:
 
-1. **Target repository + environment**: the task's work needs to land in
-   the actual TFAE app codebase — **CONFIRMED:**
-   - Repo: `trulyfree-marketplace/superadmin-react-portal` (Bitbucket
-     Cloud, the frontend Admin portal)
-   - Cursor environment name: **`TF SuperAdmin Full Stack`** — use this via
-     the `env` parameter (`{"type": "cloud", "name": "TF SuperAdmin Full
-     Stack"}`) on the Create Agent call, NOT a raw `repos` array. Naming
-     the environment ties the dispatch to its pre-built Cursor Build
-     (repo already cloned, dependencies installed, secrets configured) —
-     `env` and `repos` are mutually exclusive on Cursor's API, so don't
-     pass both.
-   - This is a separate repository/environment from `tfae-orchestration`
-     (this Routine's own GitHub-hosted config repo) — never dispatch
-     Cursor against the config repo or use its name as the environment.
+1. **Target repository + environment — resolved per task, not hardcoded.**
+   Read `config/repo-map.yaml` (fourth config file, alongside the original
+   three from Step 1 — fetch it fresh every cycle the same way). Check the
+   task's **`customfield_10321`** field (labeled "Component" in Jira's UI
+   — a FREE-TEXT field, not the native Components dropdown, so match
+   exactly, no fuzzy/partial matching). Look up that value in
+   `repo-map.yaml`'s `targets`.
+   - **If the task has no Component set, or the Component isn't a key in
+     `repo-map.yaml`: STOP here for this task.** Do not guess a target, do
+     not fall back to any previously-used repo. Transition the task to
+     "Manual Intervention Needed" and comment explaining the missing/
+     unmapped Component. Move on to check other candidate tasks this cycle
+     if any remain, but never dispatch this one on a guess.
+   - **If `dispatch_mode: new_agent`**: use that target's `repo` and
+     `cursor_environment` in Step 4's create call, same as before.
+   - **If `dispatch_mode: follow_up_existing_agent`**: this task continues
+     an already-existing agent/branch rather than starting fresh. Check
+     that `existing_agent_id` (a real `bc-<uuid>`, not just the
+     human-readable name in `description`) is present in the config. **If
+     only a name is present with no confirmed ID: STOP, do not guess an
+     agent ID from a name.** Transition to "Manual Intervention Needed"
+     and comment that the target needs a real ID before this can dispatch.
+     If a real ID is present (as it now is for `seller-v2-new-campaigns`,
+     confirmed against its actual branch name before being recorded),
+     Step 4 sends a follow-up run to that agent instead of creating a new
+     one.
 2. **Source control connection**: confirm Bitbucket Cloud is connected as a
    source control provider under Cursor's own account integrations — a
    separate one-time setup step from the API key, done on Cursor's side,
@@ -230,32 +244,36 @@ Then, mechanically:
    before committing to a POST that also writes a Jira comment and
    transitions the issue. Never fire a create call blind on the assumption
    that a bad key or network hiccup will surface cleanly after the fact.
-2. Once the pre-flight GET succeeds, **generate a client-side agent ID**
-   in the form `bc-<uuid>` before calling create — this makes the dispatch
-   idempotent against exactly the failure mode where a connection drops
-   after the create call is sent but before the response is received. Call
-   Cursor's API (`POST https://api.cursor.com/v1/agents`, using
-   `CURSOR_API_KEY`) with that ID included:
-   ```
-   {
-     "prompt": { "text": "<composed prompt>" },
-     "env": { "type": "cloud", "name": "TF SuperAdmin Full Stack" },
-     "agentId": "bc-<your-generated-uuid>",
-     "autoCreatePR": true
-   }
-   ```
-   **If the connection drops or the response is otherwise uncertain after
-   sending this request**: do not assume failure and do not silently move
-   on. Retry the exact same POST with the same `agentId`. If the agent was
-   in fact already created from the first attempt, Cursor returns
-   `409 agent_id_conflict` — treat that as confirmation the dispatch
-   succeeded (not as an error), fetch that agent's details, and proceed to
-   step 3 below as normal. This is what makes a retry safe rather than
-   risking a duplicate — never generate a second, different `agentId` for
-   what might be the same dispatch attempt.
-   The response returns both `agent.id` (the ID you supplied) and
-   `run.id` (format `run-<uuid>`) — capture both; Step 2's sync needs
-   the run ID, not just the agent ID, to check completion status.
+2. Once the pre-flight GET succeeds, dispatch according to the target's
+   `dispatch_mode` from Step 3:
+   - **`new_agent`**: generate a client-side agent ID (`bc-<uuid>`) first —
+     this makes the dispatch idempotent against exactly the failure mode
+     where a connection drops after the create call is sent but before the
+     response is received. Call `POST https://api.cursor.com/v1/agents`
+     with `CURSOR_API_KEY`:
+     ```
+     {
+       "prompt": { "text": "<composed prompt>" },
+       "env": { "type": "cloud", "name": "<cursor_environment from repo-map.yaml>" },
+       "agentId": "bc-<your-generated-uuid>",
+       "autoCreatePR": true
+     }
+     ```
+     **If the connection drops or the response is otherwise uncertain**:
+     do not assume failure. Retry the exact same POST with the same
+     `agentId` — a `409 agent_id_conflict` response confirms the first
+     attempt succeeded (not an error); fetch that agent's details and
+     proceed. Never generate a second, different `agentId` for what might
+     be the same dispatch attempt.
+   - **`follow_up_existing_agent`**: send the composed prompt as a
+     follow-up run on the existing agent ID from `repo-map.yaml` (confirm
+     the exact follow-up-run endpoint against Cursor's API before first
+     use — do NOT create a new agent for this task). If the response is
+     uncertain, re-check that agent's run history before retrying, to
+     avoid submitting the same follow-up prompt twice.
+   The response returns both `agent.id` and `run.id` (format `run-<uuid>`)
+   — capture both; Step 2's sync needs the run ID, not just the agent ID,
+   to check completion status.
 3. Comment on the Jira issue: `Dispatched to Cursor Cloud Agent. agentId=<id>
    runId=<id>` — using the real `agent.id` and `run.id` from the create
    response above. This exact format is what Step 2's sync logic parses
